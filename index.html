@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Run Tracker</title>
+<style>
+:root{--bg:#2b2d2f;--bg2:#1f2021;--ink:#fff;--mute:#b4b7ba;--line:#fc4c02;--btn:#fc4c02;--safe-t:env(safe-area-inset-top,0px);--safe-b:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%}
+body{background:linear-gradient(#3a3c3e,var(--bg2));color:var(--ink);font-family:"Segoe UI",system-ui,-apple-system,Roboto,Arial,sans-serif;text-align:center;padding:calc(var(--safe-t) + 16px) 20px calc(var(--safe-b) + 16px);max-width:520px;margin:0 auto;display:flex;flex-direction:column}
+h1{font-size:20px;font-weight:600;margin-bottom:4px}
+#status{font-size:13px;color:var(--mute);min-height:18px;margin-bottom:10px}
+.big{margin:14px 0}
+.big small{display:block;font-size:17px;color:var(--mute);margin-bottom:2px}
+.big b{font-size:54px;font-weight:700;letter-spacing:-.5px;line-height:1.05}
+.big b span{font-size:24px;font-weight:600;margin-left:4px}
+#map{width:100%;height:190px;margin:10px 0;border-radius:14px;background:rgba(0,0,0,.25)}
+.row{display:flex;gap:10px;margin:6px 0}
+.row div{flex:1;background:rgba(255,255,255,.07);border-radius:12px;padding:10px 4px}
+.row small{display:block;font-size:12px;color:var(--mute)}
+.row b{font-size:20px}
+#past{margin-top:16px;text-align:left;flex:1}
+#past h2{font-size:15px;color:var(--mute);font-weight:600;margin-bottom:6px}
+.item{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.1);font-size:15px}
+.item span:last-child{color:var(--mute)}
+.empty{color:var(--mute);font-size:14px}
+.btns{display:flex;gap:10px;margin-top:14px}
+button{flex:1;border:0;border-radius:14px;padding:16px;font:600 18px inherit;font-family:inherit;color:#fff;background:var(--btn);cursor:pointer}
+button.alt{background:#4a4d50}
+button:focus-visible{outline:3px solid #fff;outline-offset:2px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<h1 id="title">Run Tracker</h1>
+<div id="status">Tap Start run to begin.</div>
+
+<div class="big"><small>Distance</small><b><span id="dummy" hidden></span><i id="dist" style="font-style:normal">0.00</i><span>km</span></b></div>
+<div class="big"><small>Steps</small><b id="steps">0</b></div>
+<div class="big"><small>Time</small><b id="time">0:00</b></div>
+
+<canvas id="map" aria-label="Your route"></canvas>
+
+<div class="row">
+  <div><small>Pace now</small><b id="pace">--:--</b><small>/km</small></div>
+  <div><small>Avg pace</small><b id="avg">--:--</b><small>/km</small></div>
+  <div><small>Elevation</small><b id="elev">0</b><small>m climbed</small></div>
+</div>
+
+<div id="past"><h2>Past runs</h2><div id="list"></div></div>
+
+<div class="btns">
+  <button id="main">Start run</button>
+  <button id="stop" class="alt" hidden>Finish</button>
+</div>
+
+<script>
+(function(){
+var $=function(i){return document.getElementById(i)};
+var STRIDE=0.78, state="idle", watchId=null, wake=null, tick=null;
+var pts=[], dist=0, elapsed=0, lastTick=0, gain=0, lastAlt=null, recent=[];
+
+function fmtTime(s){s=Math.floor(s);var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+  return h?h+":"+String(m).padStart(2,"0")+":"+String(x).padStart(2,"0"):m+":"+String(x).padStart(2,"0")}
+function fmtPace(spk){if(!isFinite(spk)||spk<=0||spk>3600)return"--:--";var m=Math.floor(spk/60),s=Math.round(spk%60);if(s===60){m++;s=0}return m+":"+String(s).padStart(2,"0")}
+function hav(a,b){var R=6371000,r=Math.PI/180,dLa=(b.lat-a.lat)*r,dLo=(b.lng-a.lng)*r,
+  q=Math.sin(dLa/2)*Math.sin(dLa/2)+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dLo/2)*Math.sin(dLo/2);
+  return 2*R*Math.asin(Math.sqrt(q))}
+function setStatus(t){$("status").textContent=t}
+
+function load(){try{return JSON.parse(localStorage.getItem("runs")||"[]")}catch(e){return[]}}
+function save(r){try{var a=load();a.unshift(r);localStorage.setItem("runs",JSON.stringify(a.slice(0,50)))}catch(e){}}
+function renderPast(){var a=load(),l=$("list");l.innerHTML="";
+  if(!a.length){l.innerHTML='<p class="empty">No runs yet. Your finished runs show up here.</p>';return}
+  a.forEach(function(r){var d=document.createElement("div");d.className="item";
+    var s1=document.createElement("span"),s2=document.createElement("span");
+    s1.textContent=new Date(r.date).toLocaleDateString(undefined,{month:"short",day:"numeric"})+" · "+r.km.toFixed(2)+" km";
+    s2.textContent=fmtTime(r.sec)+" · "+fmtPace(r.sec/r.km)+"/km";
+    d.appendChild(s1);d.appendChild(s2);l.appendChild(d)})}
+
+function draw(){var c=$("map"),dpr=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;
+  c.width=w*dpr;c.height=h*dpr;var x=c.getContext("2d");x.scale(dpr,dpr);x.clearRect(0,0,w,h);
+  if(pts.length<2){x.fillStyle="#b4b7ba";x.font="14px sans-serif";x.textAlign="center";
+    x.fillText(state==="idle"?"Your route will appear here":"Start moving to draw your route",w/2,h/2);return}
+  var la=pts.map(function(p){return p.lat}),lo=pts.map(function(p){return p.lng}),
+  minA=Math.min.apply(0,la),maxA=Math.max.apply(0,la),minO=Math.min.apply(0,lo),maxO=Math.max.apply(0,lo),
+  k=Math.cos((minA+maxA)/2*Math.PI/180),sw=Math.max((maxO-minO)*k,1e-5),sh=Math.max(maxA-minA,1e-5),pad=18,
+  sc=Math.min((w-2*pad)/sw,(h-2*pad)/sh),ox=(w-sw*sc)/2,oy=(h-sh*sc)/2;
+  function P(p){return[ox+(p.lng-minO)*k*sc,h-oy-(p.lat-minA)*sc]}
+  x.lineJoin="round";x.lineCap="round";x.strokeStyle="#fc4c02";x.lineWidth=4;x.beginPath();
+  pts.forEach(function(p,i){var q=P(p);i?x.lineTo(q[0],q[1]):x.moveTo(q[0],q[1])});x.stroke();
+  var s=P(pts[0]),e=P(pts[pts.length-1]);
+  x.fillStyle="#fff";x.beginPath();x.arc(s[0],s[1],5,0,7);x.fill();
+  x.fillStyle="#fc4c02";x.strokeStyle="#fff";x.lineWidth=2;x.beginPath();x.arc(e[0],e[1],6,0,7);x.fill();x.stroke()}
+
+function update(){var km=dist/1000;
+  $("dist").textContent=km.toFixed(2);
+  $("steps").textContent=Math.round(dist/STRIDE).toLocaleString();
+  $("time").textContent=fmtTime(elapsed);
+  $("avg").textContent=km>0.01?fmtPace(elapsed/km):"--:--";
+  $("elev").textContent=Math.round(gain);
+  var now=Date.now();recent=recent.filter(function(r){return now-r.t<=20000});
+  if(recent.length>1){var d=0;for(var i=1;i<recent.length;i++)d+=recent[i].d;
+    var dt=(recent[recent.length-1].t-recent[0].t)/1000;$("pace").textContent=d>5?fmtPace(dt/(d/1000)):"--:--"}
+  else $("pace").textContent="--:--"}
+
+function onPos(p){
+  if(state!=="running")return;
+  var c=p.coords;
+  if(c.accuracy>35){setStatus("Weak GPS signal (±"+Math.round(c.accuracy)+" m). Keep going, it should improve.");return}
+  setStatus("GPS locked");
+  var pt={lat:c.latitude,lng:c.longitude},last=pts[pts.length-1];
+  if(last){var d=hav(last,pt);if(d<4)return;if(d>80)return;dist+=d;recent.push({t:Date.now(),d:d})}
+  else recent.push({t:Date.now(),d:0});
+  pts.push(pt);
+  if(c.altitude!=null){if(lastAlt==null)lastAlt=c.altitude;else if(c.altitude-lastAlt>=2){gain+=c.altitude-lastAlt;lastAlt=c.altitude}else if(lastAlt-c.altitude>=2)lastAlt=c.altitude}
+  update();draw()}
+
+function onErr(e){setStatus(e.code===1?"Location is blocked. Allow location for this site in your browser settings, then try again.":
+  e.code===2?"Can’t find your location. Go outside or check that GPS is on.":"GPS timed out. Trying again…")}
+
+async function lock(){try{if(navigator.wakeLock)wake=await navigator.wakeLock.request("screen")}catch(e){}}
+function unlock(){try{if(wake)wake.release()}catch(e){}wake=null}
+document.addEventListener("visibilitychange",function(){if(state==="running"&&document.visibilityState==="visible")lock()});
+
+function startTimer(){lastTick=Date.now();tick=setInterval(function(){var n=Date.now();elapsed+=(n-lastTick)/1000;lastTick=n;update()},1000)}
+function startGps(){watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,maximumAge:0,timeout:20000})}
+function stopGps(){if(watchId!=null)navigator.geolocation.clearWatch(watchId);watchId=null}
+
+$("main").onclick=function(){
+  if(state==="idle"){
+    if(!navigator.geolocation){setStatus("This browser doesn’t support GPS.");return}
+    pts=[];dist=0;elapsed=0;gain=0;lastAlt=null;recent=[];state="running";
+    $("main").textContent="Pause";$("stop").hidden=true;$("title").textContent="Running";
+    setStatus("Looking for GPS…");lock();startGps();startTimer();update();draw()}
+  else if(state==="running"){state="paused";clearInterval(tick);stopGps();unlock();
+    $("main").textContent="Resume";$("stop").hidden=false;$("title").textContent="Paused";setStatus("Paused")}
+  else if(state==="paused"){state="running";$("main").textContent="Pause";$("stop").hidden=true;
+    $("title").textContent="Running";setStatus("Looking for GPS…");lock();startGps();startTimer()}};
+
+$("stop").onclick=function(){
+  clearInterval(tick);stopGps();unlock();
+  if(dist>=20)save({date:Date.now(),km:dist/1000,sec:elapsed});
+  state="idle";$("main").textContent="Start run";$("stop").hidden=true;$("title").textContent="Run Tracker";
+  setStatus(dist>=20?"Run saved. Nice work!":"Run too short to save.");renderPast()};
+
+window.addEventListener("resize",draw);
+renderPast();draw();
+})();
+</script>
+</body>
+</html>
